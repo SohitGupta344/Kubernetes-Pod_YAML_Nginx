@@ -1,0 +1,62 @@
+trigger:
+- main
+
+variables:
+  workingDir: '$(System.DefaultWorkingDirectory)'
+
+stages:
+# ----------------- Stage 1: Terraform AKS -----------------
+- stage: Terraform_AKS
+  jobs:
+  - job: Terraform
+    pool:
+      name: Default                # updated pool name
+    steps:
+    - task: TerraformInstaller@1
+      inputs:
+        terraformVersion: 'latest'
+
+    - script: |
+        cd $(workingDir)/terraform
+        terraform init
+        terraform plan -out=tfplan
+        terraform apply -auto-approve tfplan
+      displayName: "Run Terraform"
+
+# ----------------- Stage 2: Deploy Pod -----------------
+- stage: Deploy_Pod
+  dependsOn: Terraform_AKS
+  jobs:
+  - job: K8s
+    pool:
+      name: Default                # updated pool name
+    steps:
+    - task: KubectlInstaller@0
+      inputs:
+        kubectlVersion: 'latest'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'sunday25aug'   # updated service connection
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az aks get-credentials --resource-group rg-aks-demo --name aks-demo --overwrite-existing
+          kubectl apply -f $(workingDir)/k8s/nginx-pod.yaml
+          kubectl wait --for=condition=Ready pod/nginx-pod --timeout=120s
+
+# ----------------- Stage 3: Security Scan -----------------
+- stage: Security_Scan
+  dependsOn: Deploy_Pod
+  jobs:
+  - job: TrivyScan
+    pool:
+      name: Default                # updated pool name
+    steps:
+    - script: |
+        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh
+        ./trivy image nginx:latest
+        IMAGE=$(kubectl get pod nginx-pod -o jsonpath='{.spec.containers[0].image}')
+        echo "Scanning deployed pod image: $IMAGE"
+        ./trivy image $IMAGE
+      displayName: "Trivy Security Scan"
